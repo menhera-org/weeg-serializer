@@ -1,14 +1,14 @@
 {
-  "name": "weeg-library-template",
+  "name": "weeg-serializer",
   "version": "0.1.0",
-  "description": "WebExtensions Experts Groups library template",
+  "description": "WebExtensions Experts Groups serializer library",
   "main": "dist/index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/menhera-org/weeg-library-template.git"
+    "url": "git+https://github.com/menhera-org/weeg-serializer.git"
   },
   "keywords": [
     "weeg"
@@ -16,9 +16,9 @@
   "author": "WebExtensions Experts Group",
   "license": "Apache-2.0",
   "bugs": {
-    "url": "https://github.com/menhera-org/weeg-library-template/issues"
+    "url": "https://github.com/menhera-org/weeg-serializer/issues"
   },
-  "homepage": "https://github.com/menhera-org/weeg-library-template#readme",
+  "homepage": "https://github.com/menhera-org/weeg-serializer#readme",
   "devDependencies": {
     "typescript": "^5.0.3"
   },

@@ -1,2 +1,4 @@
-# weeg-library-template
-WebExtensions Experts Group library template (for internal use)
+# weeg-serializer
+WebExtensions Experts Group serializer library
+
+This is useful for non-WebExtensions uses.
