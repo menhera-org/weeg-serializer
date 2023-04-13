@@ -17,7 +17,7 @@
   @license
 */
 
-type Memory = Map<unknown, unknown>;
+type Memory = Map<unknown, ComplexSerialization>;
 
 type PrimitiveType = 'undefined' | 'null' | 'boolean' | 'number' | 'string' | 'bigint';
 type PrimitiveSerialization = {
@@ -63,17 +63,17 @@ type TypedArraySerialization = {
   typedArrayName: string;
   typedArrayByteOffset: number;
   typedArrayByteLength: number;
-  arrayBufferSerialized: ArrayBufferSerialization;
+  arrayBufferSerialized: ChildSerialization;
 };
 
 type MapSerialization = {
   type: 'Map';
-  mapData: { key: Serialization, value: Serialization }[];
+  mapData: { key: ChildSerialization, value: ChildSerialization }[];
 };
 
 type SetSerialization = {
   type: 'Set';
-  setData: Serialization[];
+  setData: ChildSerialization[];
 };
 
 type ErrorSerialization = {
@@ -85,26 +85,43 @@ type ErrorSerialization = {
 type ArraySerialization = {
   type: 'Array';
   length: number;
-  properties: { key: string, value: Serialization }[];
+  properties: { key: string, value: ChildSerialization }[];
 };
 
 type ObjectSerialization = {
   type: 'Object';
-  properties: { key: string, value: Serialization }[];
+  properties: { key: string, value: ChildSerialization }[];
 };
 
-type Serialization = PrimitiveSerialization | BooleanSerialization | NumberSerialization | StringSerialization | DateSerialization | RegExpSerialization | ArrayBufferSerialization | TypedArraySerialization | MapSerialization | SetSerialization | ErrorSerialization | ArraySerialization | ObjectSerialization;
+type ReferenceSerialization = {
+  type: 'Reference';
+  referenceId: number;
+};
+
+type ChildSerialization = PrimitiveSerialization | ReferenceSerialization;
+
+type ComplexSerialization = BooleanSerialization | NumberSerialization | StringSerialization | DateSerialization | RegExpSerialization | ArrayBufferSerialization | TypedArraySerialization | MapSerialization | SetSerialization | ErrorSerialization | ArraySerialization | ObjectSerialization;
+
+type TopLevelSerialization = {
+  type: 'TopLevel';
+  objects: ComplexSerialization[];
+  topLevelValue: ChildSerialization;
+} | PrimitiveSerialization;
 
 /**
- * This does not allow for circular references.
+ * This can process circular references.
  * However, this cannot detect Proxy exotic objects or platform objects.
  */
-const structuredSerializeInternal = (value: unknown, memory?: Memory): Serialization => {
+const structuredSerializeInternal = (value: unknown, memory?: Memory): ChildSerialization => {
   if (!memory) {
     memory = new Map();
   }
   if (memory.has(value)) {
-    throw new TypeError('Cannot serialize a circular reference');
+    const index = [... memory.keys()].indexOf(value);
+    return {
+      type: 'Reference',
+      referenceId: index,
+    };
   }
   let deep = false;
   if (undefined === value) {
@@ -124,7 +141,7 @@ const structuredSerializeInternal = (value: unknown, memory?: Memory): Serializa
   }
 
   const TypedArray = Object.getPrototypeOf(Int8Array);
-  let serialized: Serialization;
+  let serialized: ComplexSerialization;
   if (value instanceof Boolean) {
     serialized = { type: 'Boolean', booleanData: value.valueOf().toString() };
   } else if (value instanceof Number) {
@@ -142,10 +159,7 @@ const structuredSerializeInternal = (value: unknown, memory?: Memory): Serializa
   } else if (value instanceof TypedArray || value instanceof DataView) {
     const arrayValue = value as { buffer: ArrayBuffer; byteOffset: number; byteLength: number; };
     const buffer = arrayValue.buffer;
-    const bufferSerialized = structuredSerializeInternal(buffer, memory) as ArrayBufferSerialization;
-    if (bufferSerialized.type != 'ArrayBuffer') {
-      throw new TypeError('ArrayBuffer serialization failed');
-    }
+    const bufferSerialized = structuredSerializeInternal(buffer, memory) as ChildSerialization;
     const typedArrayName = value.constructor.name;
     const typedArrayByteOffset = arrayValue.byteOffset;
     const typedArrayByteLength = arrayValue.byteLength;
@@ -195,7 +209,7 @@ const structuredSerializeInternal = (value: unknown, memory?: Memory): Serializa
     } else if (value instanceof Set) {
       for (const val of value) {
         const serializedVal = structuredSerializeInternal(val, memory);
-        (serialized as { setData: unknown[] }).setData.push(serializedVal);
+        (serialized as { setData: ChildSerialization[] }).setData.push(serializedVal);
       }
     } else {
       const ownPropertyNames = Object.getOwnPropertyNames(value);
@@ -208,17 +222,32 @@ const structuredSerializeInternal = (value: unknown, memory?: Memory): Serializa
       }
     }
   }
-  return serialized;
+  return {
+    type: 'Reference',
+    referenceId: [... memory.keys()].indexOf(value),
+  };
 };
 
 export const structuredSerialize = (value: unknown): string => {
-  const serialized = structuredSerializeInternal(value);
-  return JSON.stringify(serialized);
+  const memory = new Map<unknown, ComplexSerialization>();
+  const serialized = structuredSerializeInternal(value, memory)
+  if (serialized.type == 'primitive') {
+    return JSON.stringify(serialized);
+  }
+  const topLevelSerialization: TopLevelSerialization = {
+    type: 'TopLevel',
+    objects: [... memory.values()],
+    topLevelValue: serialized,
+  };
+  return JSON.stringify(topLevelSerialization);
 };
 
-const structuredDeserializeInternal = (serialized: Serialization): unknown => {
+const structuredDeserializeInternal = (serialized: ChildSerialization, objects: ComplexSerialization[], memory: Map<number, unknown>): unknown => {
   let deep = false;
   let value: unknown;
+  if (serialized.type == 'Reference' && memory.has(serialized.referenceId)) {
+    return memory.get(serialized.referenceId);
+  }
   if (serialized.type == 'primitive') {
     switch (serialized.primitiveType) {
       case 'undefined':
@@ -240,28 +269,31 @@ const structuredDeserializeInternal = (serialized: Serialization): unknown => {
         value = serialized.value;
         break;
     }
-  } else if (serialized.type == 'Boolean') {
-    value = new Boolean(serialized.booleanData == 'true');
-  } else if (serialized.type == 'Number') {
-    value = new Number(Number(serialized.numberData));
-  } else if (serialized.type == 'String') {
-    value = new String(serialized.stringData);
-  } else if (serialized.type == 'Date') {
-    value = new Date(serialized.dateData);
-  } else if (serialized.type == 'RegExp') {
-    value = new RegExp(serialized.originalSource, serialized.originalFlags);
-  } else if (serialized.type == 'ArrayBuffer') {
-    const size = serialized.arrayBufferByteLength;
+    return value;
+  }
+  const complexSerialized = objects[serialized.referenceId] as ComplexSerialization;
+  if (complexSerialized.type == 'Boolean') {
+    value = new Boolean(complexSerialized.booleanData == 'true');
+  } else if (complexSerialized.type == 'Number') {
+    value = new Number(Number(complexSerialized.numberData));
+  } else if (complexSerialized.type == 'String') {
+    value = new String(complexSerialized.stringData);
+  } else if (complexSerialized.type == 'Date') {
+    value = new Date(complexSerialized.dateData);
+  } else if (complexSerialized.type == 'RegExp') {
+    value = new RegExp(complexSerialized.originalSource, complexSerialized.originalFlags);
+  } else if (complexSerialized.type == 'ArrayBuffer') {
+    const size = complexSerialized.arrayBufferByteLength;
     const data = new Uint8Array(size);
-    const dataParts = serialized.arrayBufferData.split(',');
+    const dataParts = complexSerialized.arrayBufferData.split(',');
     for (let i = 0; i < dataParts.length; i++) {
       data[i] = Number(dataParts[i]);
     }
     value = data.buffer;
-  } else if (serialized.type == 'ArrayBufferView') {
-    const typedArrayName = serialized.typedArrayName;
-    const typedArrayByteOffset = serialized.typedArrayByteOffset;
-    const typedArrayByteLength = serialized.typedArrayByteLength;
+  } else if (complexSerialized.type == 'ArrayBufferView') {
+    const typedArrayName = complexSerialized.typedArrayName;
+    const typedArrayByteOffset = complexSerialized.typedArrayByteOffset;
+    const typedArrayByteLength = complexSerialized.typedArrayByteLength;
     let typedArrayConstructor;
     switch (typedArrayName) {
       case 'Int8Array':
@@ -302,24 +334,24 @@ const structuredDeserializeInternal = (serialized: Serialization): unknown => {
       default:
         throw new Error('Unknown typed array name');
     }
-    const arrayBuffer = structuredDeserializeInternal(serialized.arrayBufferSerialized) as ArrayBuffer;
+    const arrayBuffer = structuredDeserializeInternal(complexSerialized.arrayBufferSerialized, objects, memory) as ArrayBuffer;
     const typedArray = new typedArrayConstructor(arrayBuffer, typedArrayByteOffset, typedArrayByteLength);
     value = typedArray;
-  } else if (serialized.type == 'Map') {
+  } else if (complexSerialized.type == 'Map') {
     value = new Map();
     deep = true;
-  } else if (serialized.type == 'Set') {
+  } else if (complexSerialized.type == 'Set') {
     value = new Set();
     deep = true;
-  } else if (serialized.type == 'Array') {
-    value = new Array(serialized.length);
+  } else if (complexSerialized.type == 'Array') {
+    value = new Array(complexSerialized.length);
     deep = true;
-  } else if (serialized.type == 'Object') {
+  } else if (complexSerialized.type == 'Object') {
     value = {};
     deep = true;
-  } else if (serialized.type == 'Error') {
+  } else if (complexSerialized.type == 'Error') {
     let errorConstructor = Error;
-    switch (serialized.name) {
+    switch (complexSerialized.name) {
       case 'EvalError':
         errorConstructor = EvalError;
         break;
@@ -339,26 +371,28 @@ const structuredDeserializeInternal = (serialized: Serialization): unknown => {
         errorConstructor = URIError;
         break;
     }
-    const error = new errorConstructor(serialized.message);
-    error.name = serialized.name;
+    const error = new errorConstructor(complexSerialized.message);
+    error.name = complexSerialized.name;
     value = error;
   }
 
+  memory.set(serialized.referenceId, value);
+
   if (deep) {
-    if (serialized.type == 'Map') {
-      for (const { key: serializedKey, value: serializedValue } of serialized.mapData) {
-        const deserializedKey = structuredDeserializeInternal(serializedKey);
-        const deserializedValue = structuredDeserializeInternal(serializedValue);
+    if (complexSerialized.type == 'Map') {
+      for (const { key: serializedKey, value: serializedValue } of complexSerialized.mapData) {
+        const deserializedKey = structuredDeserializeInternal(serializedKey, objects, memory);
+        const deserializedValue = structuredDeserializeInternal(serializedValue, objects, memory);
         (value as Map<unknown, unknown>).set(deserializedKey, deserializedValue);
       }
-    } else if (serialized.type == 'Set') {
-      for (const serializedValue of serialized.setData) {
-        const deserializedValue = structuredDeserializeInternal(serializedValue);
+    } else if (complexSerialized.type == 'Set') {
+      for (const serializedValue of complexSerialized.setData) {
+        const deserializedValue = structuredDeserializeInternal(serializedValue, objects, memory);
         (value as Set<unknown>).add(deserializedValue);
       }
-    } else if (serialized.type == 'Array' || serialized.type == 'Object') {
-      for (const { key, value: serializedValue } of serialized.properties) {
-        const deserializedValue = structuredDeserializeInternal(serializedValue);
+    } else if (complexSerialized.type == 'Array' || complexSerialized.type == 'Object') {
+      for (const { key, value: serializedValue } of complexSerialized.properties) {
+        const deserializedValue = structuredDeserializeInternal(serializedValue, objects, memory);
         Reflect.set((value as object), key, deserializedValue);
       }
     }
@@ -367,7 +401,14 @@ const structuredDeserializeInternal = (serialized: Serialization): unknown => {
   return value;
 };
 
+/**
+ * This should be able to restore circular references.
+ */
 export const structuredDeserialize = (serializedJson: string): unknown => {
-  const serialized = JSON.parse(serializedJson) as Serialization;
-  return structuredDeserializeInternal(serialized);
+  const serialized = JSON.parse(serializedJson) as TopLevelSerialization;
+  if (serialized.type == 'primitive') {
+    return structuredDeserializeInternal(serialized, [], new Map());
+  }
+  const objects = serialized.objects;
+  return structuredDeserializeInternal(serialized.topLevelValue, objects, new Map());
 };
